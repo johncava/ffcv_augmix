@@ -42,64 +42,73 @@ DEFAULT_CROP_RATIO = 224/256
 
 from ffcv.pipeline.compiler import Compiler
 
-    def generate_code(self) -> Callable:
-        alpha = self.alpha
-        same_lam = self.same_lambda
-        my_range = Compiler.get_iterator()
-
-        def mixer(images, dst, indices):
-            np.random.seed(indices[-1])
-            num_images = images.shape[0]
-            lam = np.random.beta(alpha, alpha) if same_lam else \
-                  np.random.beta(alpha, alpha, num_images)
-            for ix in my_range(num_images):
-                l = lam if same_lam else lam[ix]
-                dst[ix] = l * images[ix] + (1 - l) * images[ix - 1]
-
-            return dst
-
 class Augmix(Operation):
 
-    def generate_code(self):
-        my_range = Compiler.get_iterator()
-        # dst will be None since we don't ask for an allocation
-        def augmix(images, dst, indices):
-            num_images = images.shape[0]
-            for ix in my_range(num_images):
-                dst = (x, aug(x, self.preprocess),
-                  aug(x, self.preprocess))
+    def __init__(self, jsd=True):
+        super().__init__()
+        self.jsd =jsd
 
-            return dst
+    def generate_code(self):
+        # Compiler.set_enabled(False)
+        aug_ = Compiler.compile(aug)
+        my_range = Compiler.get_iterator()
+        
+        def augmix(images, dst):
+            num_images = images.shape[0]
+            if self.jsd:
+                scratch_jsd = ch.zeros(images.shape[0],9,224,224)
+                for ix in my_range(num_images):
+                    x1 = ch.tensor(np.transpose(images[ix], (2,1,0)))
+                    x2 = ch.tensor(np.transpose(aug_(images[ix].copy()),(2,1,0)))
+                    x3 = ch.tensor(np.transpose(aug_(images[ix].copy()),(2,1,0)))
+                    scratch_jsd[ix] = ch.cat((x1,x2,x3),0)
+                return scratch_jsd
+            else:
+                scratch = ch.zeros(images.shape[0],3,224,224)
+                for ix in my_range(num_images):
+                    scratch[ix] = ch.tensor(np.transpose(aug_(images[ix]), (2,1,0)))
+                return scratch
         return augmix
 
     def declare_state_and_memory(self, previous_state) :
-        # No updates to state or extra memory necessary!
+        
         return previous_state, None
 
 
 train_dataset = '/scratch/jcava/imagenet_ffcv/train_400_1.00_50.ffcv'
 train_path = Path(train_dataset)
 
-res = self.get_resolution(epoch=0)
-self.decoder = RandomResizedCropRGBImageDecoder((res, res))
+decoder = RandomResizedCropRGBImageDecoder((224, 224))
 image_pipeline: List[Operation] = [
-    self.decoder,
-    Augmix()
+    decoder,
+    Augmix(jsd=False)
 ]
 
-'''
+
+label_pipeline: List[Operation] = [
+    IntDecoder(),
+    ToTensor()
+]
+
+distributed = 0
+
 # order = OrderOption.RANDOM if distributed else OrderOption.QUASI_RANDOM
 order = OrderOption.QUASI_RANDOM
 loader = Loader(train_dataset,
-                batch_size=batch_size,
-                num_workers=num_workers,
+                batch_size=1024,
+                num_workers=12,
                 order=order,
-                os_cache=in_memory,
+                os_cache=1,
                 drop_last=True,
                 pipelines={
                     'image': image_pipeline,
                     'label': label_pipeline
                 },
                 distributed=distributed)
-'''
+
+for ims, labs in loader:
+    # ims = ch.split(ims, 3, dim=1)
+    # print(ims[0].size())
+    print(ims.size())
+    break
 print('Done')
